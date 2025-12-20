@@ -2757,13 +2757,11 @@ class GraphModule(torch.nn.Module):
         l_xs_ = L_xs_
 
         flip: "f32[3, 10, 2]" = torch.flip(l_xs_, [0]);  l_xs_ = None
-
         scan_combine_fn_0 = self.scan_combine_fn_0
         scan = torch.ops.higher_order.scan(scan_combine_fn_0, [l_init_0_, l_init_1_], [flip], []);  scan_combine_fn_0 = l_init_0_ = l_init_1_ = flip = None
         getitem: "f32[1, 10, 2]" = scan[0]
         getitem_1: "f32[1, 10, 2]" = scan[1]
         out: "f32[3, 1, 10, 2]" = scan[2];  scan = None
-
         out_1: "f32[3, 1, 10, 2]" = out.flip([0]);  out = None
         return (getitem, getitem_1, out_1)
 
