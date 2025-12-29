@@ -754,7 +754,7 @@ class DictGetItemSource(ChainedSource):
         from .variables import ConstantVariable
 
         assert isinstance(
-            self.index, ConstDictKeySource
+            self.index, (ConstDictKeySource, type)
         ) or ConstantVariable.is_literal(self.index)
 
     def reconstruct(self, codegen: "PyCodegen") -> None:
@@ -817,6 +817,13 @@ class DictSubclassGetItemSource(ChainedSource):
             return f"dict.__getitem__({{0}}, {_esc_str(self.index.name)})"
         else:
             return f"{{0}}[{_esc_str(self.index, apply_repr=True)}]"
+        # elif isinstance(self.index, type):
+        #     # UserDefinedClassVariable
+        #     assert str(self.index).startswith("<class"), self.index
+        #     idx = str(self.index).removeprefix("<class '").removesuffix("'>")
+        #     return f"{self.base.name()}[{idx}]"
+        # else:
+        #     raise AssertionError(f"unhandled index type: {type(self.index)}")
 
 
 @dataclass_with_cached_hash(frozen=True)
