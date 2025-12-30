@@ -23,10 +23,9 @@ class MtiaKernelInputs : public KernelInputs {
       size_t num_attrs,
       const KernelInputParams& params)
       : KernelInputs(num_args, num_attrs),
-      input_manager_(num_args, num_attrs, params.kernel_param_types) {
-  }
+        input_manager_(num_args, num_attrs, params.kernel_param_types) {}
 
-  void add_arg(void *arg) override {
+  void add_arg(void* arg) override {
     TORCH_CHECK(false, "add_arg not supported for MTIA!");
   }
 
@@ -61,8 +60,11 @@ class MtiaTritonKernelManager final : public TritonKernelManager {
     // Store params for use in ensureLoaded during launch
     kernel_input_params_ = params;
     launcher_ = std::make_unique<mtia::sigmoid::KernelLauncher>(
-      kernel_name_, kernel_bin_path_, params.kernel_param_names,
-      params.kernel_param_types, params.output_indices);
+        kernel_name_,
+        kernel_bin_path_,
+        params.kernel_param_names,
+        params.kernel_param_types,
+        params.output_indices);
     return std::make_unique<MtiaKernelInputs>(num_args, num_attrs, params);
   }
 
@@ -78,21 +80,23 @@ MtiaTritonKernelManager::MtiaTritonKernelManager(
     std::string kernel_bin_path,
     std::string kernel_launcher_bin_path)
     : TritonKernelManager(std::move(kernel_name), std::move(kernel_bin_path)),
-    launcher_(nullptr) {}
-
+      launcher_(nullptr) {}
 
 void MtiaTritonKernelManager::launch(
     const LaunchParams& launch_params,
     void** args) {
-  TORCH_CHECK(launcher_ != nullptr, "Kernel not loaded, create_inputs must be called before launching!");
-  launcher_->launch(launch_params.grid_dims.x,
-    launch_params.grid_dims.y,
-    launch_params.grid_dims.z,
-    launch_params.mtia_tile_width,
-    launch_params.mtia_tile_height,
-    launch_params.mtia_base_pe,
-    kernel_input_params_.kernel_param_names.size(),
-    args);
+  TORCH_CHECK(
+      launcher_ != nullptr,
+      "Kernel not loaded, create_inputs must be called before launching!");
+  launcher_->launch(
+      launch_params.grid_dims.x,
+      launch_params.grid_dims.y,
+      launch_params.grid_dims.z,
+      launch_params.mtia_tile_width,
+      launch_params.mtia_tile_height,
+      launch_params.mtia_base_pe,
+      kernel_input_params_.kernel_param_names.size(),
+      args);
 }
 
 namespace {
