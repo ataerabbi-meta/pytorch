@@ -1,5 +1,3 @@
-// (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
-
 #include <torch/nativert/executor/triton/TritonKernelManager.h>
 
 #include <ATen/Functions.h>
