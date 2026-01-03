@@ -302,6 +302,28 @@ struct CUDACachingHostAllocatorImpl
     C10_CUDA_CHECK(cudaStreamIsCapturing(s, &status));
     return status != cudaStreamCaptureStatusNone;
   }
+
+  /**
+   * Returns the maximum allocation size (in bytes) that will be rounded up
+   * to the next power of two. Configured via PYTORCH_CUDA_ALLOC_CONF with
+   * pinned_max_round_size_mb option.
+   * See https://github.com/pytorch/pytorch/issues/150517
+   */
+  size_t pinned_max_round_size() override {
+    size_t size_mb = c10::cuda::CUDACachingAllocator::CUDAAllocatorConfig::pinned_max_round_size_mb();
+    return size_mb * 1024 * 1024;  // Convert MB to bytes
+  }
+
+  /**
+   * Returns the maximum allocation size (in bytes) that will be cached for
+   * reuse. Configured via PYTORCH_CUDA_ALLOC_CONF with pinned_max_cached_size_mb
+   * option.
+   * See https://github.com/pytorch/pytorch/issues/150517
+   */
+  size_t pinned_max_cached_size() override {
+    size_t size_mb = c10::cuda::CUDACachingAllocator::CUDAAllocatorConfig::pinned_max_cached_size_mb();
+    return size_mb * 1024 * 1024;  // Convert MB to bytes
+  }
 };
 
 DECLARE_HOST_ALLOCATOR(

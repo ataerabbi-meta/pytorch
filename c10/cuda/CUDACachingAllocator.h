@@ -164,6 +164,8 @@ struct AllocatorConfigInfo {
   double garbage_collection_threshold;
   size_t max_split_size;
   size_t pinned_num_register_threads;
+  size_t pinned_max_round_size_mb;
+  size_t pinned_max_cached_size_mb;
   bool expandable_segments;
   bool release_lock_on_malloc;
   bool pinned_use_host_register;

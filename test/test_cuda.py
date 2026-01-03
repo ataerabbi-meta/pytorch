@@ -270,6 +270,62 @@ class TestCuda(TestCase):
 
         expected = empty_stats()
 
+    @serialTest()
+    def test_pinned_memory_max_round_size_config(self):
+        """
+        Test pinned_max_round_size_mb config option.
+
+        Verifies that when pinned_max_round_size_mb is configured, pinned memory
+        allocations above that threshold are not rounded up to the next power
+        of two, avoiding memory waste.
+
+        Without the config, a 129MB tensor results in 256MB allocation due to
+        power-of-two rounding. With pinned_max_round_size_mb set, the
+        allocation should be close to the requested size.
+
+        See https://github.com/pytorch/pytorch/issues/150517
+        """
+        gc.collect()
+        torch._C._host_emptyCache()
+        torch.cuda.reset_accumulated_host_memory_stats()
+        torch.cuda.reset_peak_host_memory_stats()
+
+        # 129 MB in bytes (just above 128MB power-of-two boundary)
+        mb_129 = 129 * 1024 * 1024
+        # Number of float16 elements for ~129MB
+        num_elements = mb_129 // 2  # 2 bytes per float16
+        requested_bytes = num_elements * 2
+
+        # Sanity check: requested size should be just above 128MB
+        mb_128 = 128 * 1024 * 1024
+        self.assertGreater(requested_bytes, mb_128)
+
+        # Enable the fix: allocations > 64MB will not be rounded to power-of-two
+        with pinned_memory_max_round_size(64):
+            t = torch.empty(num_elements, dtype=torch.float16, pin_memory=True)
+            self.assertTrue(t.is_pinned())
+
+            # Check the actual allocated bytes
+            stats = torch.cuda.host_memory_stats()
+            allocated_bytes = stats["allocated_bytes.current"]
+
+            # With pinned_max_round_size_mb set, the allocation should NOT be
+            # rounded up to 256MB. We allow some overhead (up to 50%) but NOT 2x.
+            max_acceptable_overhead = 1.5
+            max_acceptable_bytes = int(requested_bytes * max_acceptable_overhead)
+
+            self.assertLessEqual(
+                allocated_bytes,
+                max_acceptable_bytes,
+                f"Pinned memory allocation is too wasteful: "
+                f"requested {requested_bytes / (1024**2):.2f} MB but got "
+                f"{allocated_bytes / (1024**2):.2f} MB "
+                f"(expected at most {max_acceptable_bytes / (1024**2):.2f} MB). "
+                f"See https://github.com/pytorch/pytorch/issues/150517",
+            )
+
+            del t
+
     def test_pinned_memory_empty_cache(self):
         try:
             for alloc_settings in (True, False):
@@ -5484,6 +5540,28 @@ def caching_host_allocator_use_background_threads(use_background_threads: bool):
             torch.cuda.memory._set_allocator_settings(
                 "pinned_use_background_threads:False"
             )
+
+
+@contextlib.contextmanager
+def pinned_memory_max_round_size(size_mb: int):
+    """
+    Context manager to set pinned_max_round_size_mb for pinned memory allocations.
+
+    When set, allocations larger than size_mb will not be rounded up to the next
+    power of two, avoiding memory waste for large allocations.
+
+    See https://github.com/pytorch/pytorch/issues/150517
+    """
+    # Save current value to restore later
+    snapshot = torch.cuda.memory._snapshot()
+    cur_value = snapshot["allocator_settings"].get("pinned_max_round_size_mb", 0)
+    torch._C._accelerator_setAllocatorSettings(f"pinned_max_round_size_mb:{size_mb}")
+    try:
+        yield
+    finally:
+        torch._C._accelerator_setAllocatorSettings(
+            f"pinned_max_round_size_mb:{cur_value}"
+        )
 
 
 @unittest.skipIf(not TEST_CUDA, "CUDA not available, skipping tests")

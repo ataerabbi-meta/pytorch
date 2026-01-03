@@ -4162,6 +4162,10 @@ class NativeCachingAllocator : public CUDAAllocator {
     md.max_split_size = AcceleratorAllocatorConfig::max_split_size();
     md.pinned_num_register_threads =
         CUDAAllocatorConfig::pinned_num_register_threads();
+    md.pinned_max_round_size_mb =
+        CUDAAllocatorConfig::pinned_max_round_size_mb();
+    md.pinned_max_cached_size_mb =
+        CUDAAllocatorConfig::pinned_max_cached_size_mb();
     md.expandable_segments = CUDAAllocatorConfig::expandable_segments();
     md.release_lock_on_malloc =
         CUDAAllocatorConfig::release_lock_on_cudamalloc();

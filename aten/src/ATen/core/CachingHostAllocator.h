@@ -298,7 +298,13 @@ struct CachingHostAllocatorImpl {
 
     // Round up the allocation to the nearest power of two to improve reuse.
     // These power of two sizes are also used to index into the free list.
-    size_t roundSize = c10::llvm::PowerOf2Ceil(size);
+    // However, for large allocations above a configurable threshold, we skip
+    // rounding to avoid memory waste. See https://github.com/pytorch/pytorch/issues/150517
+    size_t roundSize = size;
+    size_t maxRoundSize = pinned_max_round_size();
+    if (maxRoundSize == 0 || size <= maxRoundSize) {
+      roundSize = c10::llvm::PowerOf2Ceil(size);
+    }
 
     // First, try to allocate from the free list of the chosen pool
     auto* block = get_free_block(roundSize, pool);
@@ -381,10 +387,35 @@ struct CachingHostAllocatorImpl {
     }
 
     if (!events.has_value()) {
-      auto& pool = pool_from_block(block);
-      auto index = size_index(block->size_);
-      std::lock_guard<std::mutex> g(pool.free_list_[index].mutex_);
-      pool.free_list_[index].list_.push_back(block);
+      // Check if block is too large to cache
+      // See https://github.com/pytorch/pytorch/issues/150517
+      size_t maxCachedSize = pinned_max_cached_size();
+      if (maxCachedSize > 0 && block->size_ > maxCachedSize) {
+        // Block too large to cache, free it immediately
+        auto& pool = pool_from_block(block);
+        {
+          std::lock_guard<std::mutex> g(pool.blocks_mutex_);
+          pool.blocks_.erase(block);
+          pool.ptr_to_block_.erase(block->ptr_);
+        }
+        auto index = size_index(block->size_);
+        {
+          std::lock_guard<std::mutex> g(pool.free_list_[index].mutex_);
+          stats_.allocations.decrease(1);
+          stats_.allocated_bytes.decrease(block->size_);
+          stats_.allocation_bucket_stats[index].decrease(1);
+          stats_.allocated_bytes_bucket_stats[index].decrease(block->size_);
+          stats_.active_bucket_stats[index].decrease(1);
+          stats_.active_bytes_bucket_stats[index].decrease(block->size_);
+        }
+        free_block(block);
+        delete block;
+      } else {
+        auto& pool = pool_from_block(block);
+        auto index = size_index(block->size_);
+        std::lock_guard<std::mutex> g(pool.free_list_[index].mutex_);
+        pool.free_list_[index].list_.push_back(block);
+      }
     } else if (allocated_during_capture) {
       // pass: No events are ever recorded during stream capture.
 
@@ -477,6 +508,28 @@ struct CachingHostAllocatorImpl {
   virtual bool pinned_use_background_threads() {
     return c10::CachingAllocator::AcceleratorAllocatorConfig::
         pinned_use_background_threads();
+  }
+
+  /**
+   * Returns the maximum allocation size (in bytes) that will be rounded up
+   * to the next power of two. Allocations larger than this will use their
+   * exact size to avoid memory waste.
+   * Returns 0 if rounding should always be applied (default behavior).
+   * See https://github.com/pytorch/pytorch/issues/150517
+   */
+  virtual size_t pinned_max_round_size() {
+    return 0;  // Default: always round (0 = disabled)
+  }
+
+  /**
+   * Returns the maximum allocation size (in bytes) that will be cached for
+   * reuse. Allocations larger than this will be freed immediately when
+   * released.
+   * Returns 0 if all allocations should be cached (default behavior).
+   * See https://github.com/pytorch/pytorch/issues/150517
+   */
+  virtual size_t pinned_max_cached_size() {
+    return 0;  // Default: always cache (0 = disabled)
   }
 
   virtual void copy_data(void* dest [[maybe_unused]], const void* src [[maybe_unused]], std::size_t count [[maybe_unused]]) const {
@@ -720,10 +773,33 @@ struct CachingHostAllocatorImpl {
 
       if (available) {
         auto index = size_index(block->size_);
-        std::lock_guard<std::mutex> g(pool.free_list_[index].mutex_);
-        pool.free_list_[index].list_.push_back(block);
-        stats_.active_bucket_stats[index].decrease(1);
-        stats_.active_bytes_bucket_stats[index].decrease(size);
+        // Check if block is too large to cache
+        // See https://github.com/pytorch/pytorch/issues/150517
+        size_t maxCachedSize = pinned_max_cached_size();
+        if (maxCachedSize > 0 && block->size_ > maxCachedSize) {
+          // Block too large to cache, free it immediately
+          {
+            std::lock_guard<std::mutex> g(pool.blocks_mutex_);
+            pool.blocks_.erase(block);
+            pool.ptr_to_block_.erase(block->ptr_);
+          }
+          {
+            std::lock_guard<std::mutex> g(pool.free_list_[index].mutex_);
+            stats_.allocations.decrease(1);
+            stats_.allocated_bytes.decrease(block->size_);
+            stats_.allocation_bucket_stats[index].decrease(1);
+            stats_.allocated_bytes_bucket_stats[index].decrease(block->size_);
+            stats_.active_bucket_stats[index].decrease(1);
+            stats_.active_bytes_bucket_stats[index].decrease(block->size_);
+          }
+          free_block(block);
+          delete block;
+        } else {
+          std::lock_guard<std::mutex> g(pool.free_list_[index].mutex_);
+          pool.free_list_[index].list_.push_back(block);
+          stats_.active_bucket_stats[index].decrease(1);
+          stats_.active_bytes_bucket_stats[index].decrease(size);
+        }
         if (size != -1) {
           return;
         }

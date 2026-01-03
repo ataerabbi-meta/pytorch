@@ -103,6 +103,12 @@ void CUDAAllocatorConfig::parseArgs(const std::string& env) {
     } else if (key == "pinned_reserve_segment_size_mb") {
       i = parsePinnedReserveSegmentSize(tokenizer, i);
       used_native_specific_option = true;
+    } else if (key == "pinned_max_round_size_mb") {
+      i = parsePinnedMaxRoundSize(tokenizer, i);
+      used_native_specific_option = true;
+    } else if (key == "pinned_max_cached_size_mb") {
+      i = parsePinnedMaxCachedSize(tokenizer, i);
+      used_native_specific_option = true;
     } else if (key == "graph_capture_record_stream_reuse") {
       i = parseGraphCaptureRecordStreamReuse(tokenizer, i);
       used_native_specific_option = true;
@@ -189,6 +195,28 @@ size_t CUDAAllocatorConfig::parsePinnedReserveSegmentSize(
   TORCH_CHECK_VALUE(
       val2 > 0, "Pinned reserve segment size has to be greater than 0");
   m_pinned_reserve_segment_size_mb = val2;
+  return i;
+}
+
+size_t CUDAAllocatorConfig::parsePinnedMaxRoundSize(
+    const c10::CachingAllocator::ConfigTokenizer& tokenizer,
+    size_t i) {
+  tokenizer.checkToken(++i, ":");
+  size_t val = tokenizer.toSizeT(++i);
+  // 0 means disabled (all allocations rounded as before)
+  // Any positive value sets the threshold in MB
+  m_pinned_max_round_size_mb = val;
+  return i;
+}
+
+size_t CUDAAllocatorConfig::parsePinnedMaxCachedSize(
+    const c10::CachingAllocator::ConfigTokenizer& tokenizer,
+    size_t i) {
+  tokenizer.checkToken(++i, ":");
+  size_t val = tokenizer.toSizeT(++i);
+  // 0 means disabled (all allocations cached as before)
+  // Any positive value sets the threshold in MB
+  m_pinned_max_cached_size_mb = val;
   return i;
 }
 
