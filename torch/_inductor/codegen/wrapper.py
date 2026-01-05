@@ -2204,8 +2204,6 @@ class PythonWrapperCodegen(CodeGen):
 
             import pickle
 
-            assert isinstance(value, torch.ScriptObject)
-
             output.writeline(f"{name} = pickle.loads({pickle.dumps(value)!r})")
 
         output.writelines(
