@@ -191,9 +191,6 @@ class CudaReproTests(TestCase):
         self.assertEqual(compiled_out["ten0"], eager_out["ten0"])
         self.assertEqual(compiled_out["ten1"], eager_out["ten1"])
 
-    @skipIfXpu(
-        msg="NotImplementedError, https://github.com/intel/torch-xpu-ops/issues/2271"
-    )
     def test_effn_attn_bias_padding(self):
         batch_size, num_heads, seq_len, head_dim = 2, 32, 512, 128
 
@@ -246,9 +243,6 @@ class CudaReproTests(TestCase):
     # Greatest absolute difference: 0.07861328125 at index (14, 13, 1008, 36) (up to 1e-05 allowed)
     # Greatest relative difference: 2.90625 at index (14, 13, 1008, 36) (up to 0.016 allowed)
     @skipIfRocmArch(MI350_ARCH)
-    @skipIfXpu(
-        msg="TorchRuntimeError due to scaled_dot_product_attention, https://github.com/intel/torch-xpu-ops/issues/2271"
-    )
     def test_effn_attn_bias_padding_misaligned(self):
         seqlen_start = 1008
 
