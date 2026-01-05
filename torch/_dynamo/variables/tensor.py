@@ -23,6 +23,7 @@ import traceback
 import types
 from collections.abc import Sequence
 from contextlib import nullcontext
+from itertools import chain
 from types import NoneType
 from typing import Any, NoReturn, Optional, TYPE_CHECKING
 
@@ -45,6 +46,7 @@ from torch.utils._python_dispatch import is_traceable_wrapper_subclass
 from .. import config, graph_break_hints, variables
 from .._trace_wrapped_higher_order_op import trace_wrapped
 from ..exc import (
+    TorchRuntimeError,
     unimplemented,
     UnknownPropertiesDuringBackwardTrace,
     UserError,
@@ -1072,18 +1074,158 @@ class TensorVariable(VariableTracker):
         out = tolist(tensor, self.as_proxy())
         return VariableTracker.build(tx, out)
 
+    def _collect_backward_inputs(self, vars_iter, error_on_non_leaf=False):
+        """
+        Collect unique leaf tensors from vars_iter for backward.
+
+        Only collects leaf tensors (no grad_fn). Non-leaf tensors are skipped
+        (or error if error_on_non_leaf=True) since the accumulate_grad polyfill
+        cannot handle .grad access on non-leaf tensors as Dynamo creates generic
+        GetAttrVariable (https://github.com/pytorch/pytorch/issues/171204).
+
+        Deduplicates by proxy.node.
+        Returns list of unique leaf tensor variables.
+        """
+        from ..source import SyntheticLocalSource
+
+        result = []
+        seen_nodes: set = set()
+        for var in vars_iter:
+            if isinstance(var, TensorVariable) and var.requires_grad:
+                # We need to filter out tensors where accumulate_grad polyfill won't work.
+                # The polyfill accesses tensor.grad (see torch/_dynamo/polyfills/__init__.py).
+                # For these cases, .grad becomes a GetAttrVariable instead of TensorVariable,
+                # and tensor operations on it fail. This is a Dynamo coverage gap that could
+                # be fixed by properly tracking .grad as TensorVariable:
+                #
+                # 1. Non-leaf tensors (has_grad_fn=True): .grad is GetAttrVariable.
+                #
+                # 2. In-graph created tensors (SyntheticLocalSource): subguards_allowed()
+                #    returns False, so dynamic_getattr fails.
+                if var.has_grad_fn:
+                    if error_on_non_leaf:
+                        unimplemented(
+                            gb_type="backward() with non-leaf tensor",
+                            context=f"backward(inputs=[...]) with non-leaf tensor: {var}",
+                            explanation="backward(inputs=[...]) with non-leaf tensors is not yet supported.",
+                            hints=[
+                                "Only pass leaf tensors (parameters, graph inputs) to backward(inputs=...)",
+                            ],
+                        )
+                elif not var.source or isinstance(var.source, SyntheticLocalSource):
+                    if error_on_non_leaf:
+                        unimplemented(
+                            gb_type="backward() with in-graph created tensor",
+                            context=f"backward(inputs=[...]) with in-graph created tensor: {var}",
+                            explanation="backward(inputs=[...]) with tensors created inside the "
+                            "compiled function is not yet supported.",
+                            hints=[
+                                "Only pass tensors that are inputs to the compiled function or captured from outside",
+                            ],
+                        )
+                else:
+                    node = var.proxy.node
+                    if node not in seen_nodes:
+                        seen_nodes.add(node)
+                        result.append(var)
+        return result
+
     def method_backward(
         self,
         tx: "InstructionTranslator",
-        *args: VariableTracker,
-        **kwargs: VariableTracker,
-    ) -> NoReturn:
-        unimplemented(
-            gb_type="Unsupported Tensor.backward() call",
-            context=f"call_method {self} backward {args} {kwargs}",
-            explanation="Dynamo currently does not support tracing `Tensor.backward()`.",
-            hints=[*graph_break_hints.FUNDAMENTAL],
+        gradient=None,
+        retain_graph=None,
+        create_graph=None,
+        inputs=None,
+    ):
+        """
+        Trace tensor.backward() by rewriting as autograd.grad() + accumulate_grad.
+
+        Implementation:
+        1. Collect leaf tensors to compute gradients for
+        2. Call autograd.grad(loss, inputs) to compute gradients
+        3. For each leaf tensor, call accumulate_grad to update .grad
+
+        Non-leaf tensor handling:
+        - Auto-detect (inputs=None): Non-leaf tensors are silently skipped.
+          This matches eager where only leaves get .grad.
+        - User-provided (inputs=[...]): Errors if any non-leaf tensor is found.
+          While eager backward(inputs=[non_leaf]) works, Dynamo cannot trace it
+          because the accumulate_grad polyfill accesses .grad, and Dynamo creates
+          a generic GetAttrVariable for .grad on non-leaf tensors (instead of a
+          TensorVariable), which cannot be used in tensor operations.
+
+        TODO: Support non-leaf tensors by fixing .grad access on non-leaf in Dynamo.
+        """
+        if not config.trace_autograd_ops:
+            unimplemented(
+                gb_type="Unsupported Tensor.backward() call",
+                context=f"call_method {self} backward {gradient} {retain_graph} {create_graph} {inputs}",
+                explanation="Dynamo currently does not support tracing `Tensor.backward()` when trace_autograd_ops is off.",
+                hints=["Set torch._dynamo.trace_autograd_ops=True"],
+            )
+
+        if not self.requires_grad and not self.has_grad_fn:
+            raise TorchRuntimeError(
+                "tensor does not require grad and does not have a grad_fn"
+            )
+
+        # Step 1: Collect leaf tensors to compute gradients for
+        auto_detect = inputs is None
+        if auto_detect:
+            # Sources can be either user inputs (params are included here)
+            # or parameters that are created in forward.
+            all_vars = chain(
+                tx.output.leaf_var_creation_order,
+                tx.output.input_source_to_var.values(),
+            )
+            input_vars = self._collect_backward_inputs(all_vars)
+            if not input_vars:
+                return ConstantVariable.create(None)
+        else:
+            provided_vars = (
+                inputs.items
+                if isinstance(inputs, variables.BaseListVariable)
+                else [inputs]
+            )
+            input_vars = self._collect_backward_inputs(
+                provided_vars, error_on_non_leaf=True
+            )
+
+        # Build autograd.grad call
+        grad_kwargs = {"allow_unused": VariableTracker.build(tx, auto_detect)}
+        if retain_graph is not None:
+            grad_kwargs["retain_graph"] = retain_graph
+        if create_graph is not None:
+            grad_kwargs["create_graph"] = create_graph
+
+        inputs_var = VariableTracker.build(tx, input_vars)
+        grad_args = [self, inputs_var]
+        if gradient is not None:
+            grad_args.append(gradient)
+
+        autograd_grad_fn = VariableTracker.build(tx, torch.autograd.grad)
+        grads_var = autograd_grad_fn.call_function(tx, grad_args, grad_kwargs)
+
+        # Accumulate gradients for unique leaf tensors under no_grad context
+        # to replicate eager autograd engine.
+        from .ctx_manager import GradModeVariable
+
+        grad_mode_var = GradModeVariable.create(tx, False, initialized=True)
+        grad_mode_var.enter(tx)
+
+        accumulate_grad_fn = VariableTracker.build(
+            tx, torch.ops.inductor.accumulate_grad_.default
         )
+        for idx, input_var in enumerate(input_vars):
+            grad_i = grads_var.call_method(
+                tx, "__getitem__", [VariableTracker.build(tx, idx)], {}
+            )
+            accumulate_grad_fn.call_function(tx, [input_var, grad_i], {})
+
+        grad_mode_var.exit(tx)
+
+        return VariableTracker.build(tx, None)
 
     def method_data_ptr(
         self,
