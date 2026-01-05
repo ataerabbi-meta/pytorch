@@ -380,7 +380,6 @@ class FakeTensorConverter:
         maybe_memo = self._get_memo(t)
         if maybe_memo is not None:
             return maybe_memo
-        # not yet supported in metatensors
         if t.is_quantized:
             raise UnsupportedFakeTensorException("quantized nyi in meta tensors")
         if type(t) is torch.nn.Parameter:
@@ -420,6 +419,7 @@ class FakeTensorConverter:
             source=source,
             symbolic_context=symbolic_context,
             trace=trace,
+            fake_mode=fake_mode,
         )
         if out is NotImplemented:
             raise UnsupportedFakeTensorException("meta converter nyi")
